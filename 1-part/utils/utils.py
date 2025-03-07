@@ -12,7 +12,16 @@ def num_swapped_pairs(ys_true: Tensor, ys_pred: Tensor) -> int:
     :param ys_pred: тензор с предсказанными значениями
     :return: количество неправильно упорядоченных пар
     """ 
-    return torch.sum(ys_true.unsqueeze(1) < ys_true.unsqueeze(0) & ys_pred.unsqueeze(1) > ys_pred.unsqueeze(0)).item()
+    # return torch.sum(ys_true.unsqueeze(1) < ys_true.unsqueeze(0) & ys_pred.unsqueeze(1) > ys_pred.unsqueeze(0)).item()
+    # Сравниваем элементы ys_true и ys_pred
+    true_comparison = ys_true.unsqueeze(1) < ys_true.unsqueeze(0)  # Маска для ys_true
+    pred_comparison = ys_pred.unsqueeze(1) > ys_pred.unsqueeze(0)  # Маска для ys_pred
+
+    # Используем логическое И (logical_and) вместо побитового И (&)
+    swapped_pairs = torch.logical_and(true_comparison, pred_comparison)
+
+    # Считаем количество неправильно упорядоченных пар
+    return torch.sum(swapped_pairs).item()
 
 
 def compute_gain(y_value: float, gain_scheme: str) -> float:
