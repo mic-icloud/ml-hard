@@ -45,6 +45,8 @@ def dcg(ys_true: Tensor, ys_pred: Tensor, gain_scheme: str) -> float:
     :param ys_pred: тензор с предсказанными значениями
     :param gain_scheme: 'const' - константное начисление, 'exp2' - начисление по формуле 2^relevance - 1
     """
+    ys_true = ys_true.squeeze()
+    ys_pred = ys_pred.squeeze()
     _, indices = sort(ys_pred, descending=True)
     ys_true = ys_true[indices]
     return torch.sum(compute_gain(ys_true, gain_scheme) / torch.log2(torch.arange(ys_true.shape[0], dtype=torch.float32) + 2)).item()
@@ -117,3 +119,22 @@ def average_precision(ys_true: Tensor, ys_pred: Tensor) -> float:
     if torch.sum(ys_true) == 0:
         return -1
     return torch.sum(torch.cumsum(ys_true, 0) * ys_true / torch.arange(1, ys_true.shape[0] + 1, dtype=torch.float32)).item()
+
+def listnet_ce_loss(y_i, z_i):
+    """
+    y_i: (n_i, 1) GT
+    z_i: (n_i, 1) preds
+    """
+
+    P_y_i = torch.softmax(y_i, dim=0)
+    P_z_i = torch.softmax(z_i, dim=0)
+    return -torch.sum(P_y_i * torch.log(P_z_i))
+
+def listnet_kl_loss(y_i, z_i):
+    """
+    y_i: (n_i, 1) GT
+    z_i: (n_i, 1) preds
+    """
+    P_y_i = torch.softmax(y_i, dim=0)
+    P_z_i = torch.softmax(z_i, dim=0)
+    return -torch.sum(P_y_i * torch.log(P_z_i/P_y_i))
