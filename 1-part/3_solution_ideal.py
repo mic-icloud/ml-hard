@@ -7,21 +7,18 @@ from sklearn.preprocessing import StandardScaler
 
 from typing import List
 
-import utils
-
 
 class ListNet(torch.nn.Module):
-    def __init__(self, num_input_features: int, hidden_dim: int):
+    def __init__(self, num_input_features, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
-        # укажите архитектуру простой модели здесь
         self.model = torch.nn.Sequential(
-            torch.nn.Linear(num_input_features, hidden_dim),
+            torch.nn.Linear(num_input_features, self.hidden_dim),
             torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, 1),
+            torch.nn.Linear(self.hidden_dim, 1),
         )
 
-    def forward(self, input_1: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_1):
         logits = self.model(input_1)
         return logits
 
@@ -54,81 +51,88 @@ class Solution:
     def _prepare_data(self) -> None:
         (X_train, y_train, self.query_ids_train,
             X_test, y_test, self.query_ids_test) = self._get_data()
-        # используйте методы _scale_features_in_query_groups для X_train и X_test.
-        # поместить X_train и X_test, y_train и y_test в torch.FloatTensor
-        self.X_train = torch.FloatTensor(self._scale_features_in_query_groups(X_train, self.query_ids_train))
-        self.y_train = torch.FloatTensor(y_train)
-        self.X_test = torch.FloatTensor(self._scale_features_in_query_groups(X_test, self.query_ids_test))
-        self.y_test = torch.FloatTensor(y_test)
+
+        X_train = self._scale_features_in_query_groups(
+            X_train, self.query_ids_train)
+        X_test = self._scale_features_in_query_groups(
+            X_test, self.query_ids_train)
+
+        self.X_train = torch.FloatTensor(X_train)
+        self.X_test = torch.FloatTensor(X_test)
+
+        self.ys_train = torch.FloatTensor(y_train)
+        self.ys_test = torch.FloatTensor(y_test)
 
     def _scale_features_in_query_groups(self, inp_feat_array: np.ndarray,
                                         inp_query_ids: np.ndarray) -> np.ndarray:
-        unique_query_ids = np.unique(inp_query_ids)
-        scaled_features = np.zeros_like(inp_feat_array)
-        
-        for qid in unique_query_ids:
-            group_indices = np.where(inp_query_ids == qid)[0]
+        for cur_id in np.unique(inp_query_ids):
+            mask = inp_query_ids == cur_id
+            tmp_array = inp_feat_array[mask]
             scaler = StandardScaler()
-            scaled_features[group_indices] = scaler.fit_transform(inp_feat_array[group_indices])
-        
-        return scaled_features
+            inp_feat_array[mask] = scaler.fit_transform(tmp_array)
+
+        return inp_feat_array
 
     def _create_model(self, listnet_num_input_features: int,
                       listnet_hidden_dim: int) -> torch.nn.Module:
         torch.manual_seed(0)
-        # создайте модель ListNet
-        net = ListNet(listnet_num_input_features, listnet_hidden_dim)
+        net = ListNet(num_input_features=listnet_num_input_features,
+                      hidden_dim=listnet_hidden_dim)
         return net
 
     def fit(self) -> List[float]:
-        # обучение модели в течение n_epochs
-        ndcgs = []
-        for _ in range(self.n_epochs):
+        metrics = []
+        for epoch_no in range(1, self.n_epochs + 1):
             self._train_one_epoch()
-            ndcgs.append(self._eval_test_set())
-        return  ndcgs
+            ep_metric = self._eval_test_set()
+            metrics.append(ep_metric)
+        return metrics
+
+    def save_model(self, path='listnet_lec3.pth'):
+        f = open(path, 'wb')
+        torch.save(self.model.state_dict, f)
+
+    def load_model(self, path='listnet_lec3.pth'):
+        f = open(path, 'rb')
+        state_dict = torch.load(f)
+        self.model.load_state_dict(state_dict)
 
     def _calc_loss(self, batch_ys: torch.FloatTensor,
                    batch_pred: torch.FloatTensor) -> torch.FloatTensor:
-        # 
-        return utils.listnet_kl_loss(batch_ys, batch_pred)
+        P_y_i = torch.softmax(batch_ys, dim=0)
+        P_z_i = torch.softmax(batch_pred, dim=0)
+        return -torch.sum(P_y_i * torch.log(P_z_i/P_y_i))
 
-    def _train_one_epoch(self) -> None:
+    def _train_one_epoch(self):
         self.model.train()
-        unique_query_ids = np.unique(self.query_ids_train)
-        for qid in unique_query_ids:
-            group_indices = np.where(self.query_ids_train == qid)[0]
-            X_batch = self.X_train[group_indices]
-            y_batch = self.y_train[group_indices]
+        for cur_id in np.unique(self.query_ids_train):
+            mask_train = self.query_ids_train == cur_id
+            batch_X = self.X_train[mask_train]
+            batch_ys = self.ys_train[mask_train]
 
             self.optimizer.zero_grad()
-            # import pdb; pdb.set_trace()
-            y_pred = self.model(X_batch).squeeze()
-            loss = self._calc_loss(y_batch, y_pred)
-            loss.backward()
+            batch_pred = self.model(batch_X).reshape(-1, )
+            batch_loss = self._calc_loss(batch_ys, batch_pred)
+            batch_loss.backward(retain_graph=True)
             self.optimizer.step()
 
     def _eval_test_set(self) -> float:
         with torch.no_grad():
             self.model.eval()
             ndcgs = []
-            # допишите ваш код здесь
-            ids = np.unique(self.query_ids_test)
-            for qid in ids:
-                group_indices = np.where(self.query_ids_test == qid)[0]
-                X_batch = self.X_test[group_indices]
-                y_batch = self.y_test[group_indices]
-                y_pred = self.model(X_batch)
-                try:
-                    ndcgs.append(self._ndcg_k(y_batch, y_pred, self.ndcg_top_k))
-                except Exception:
+            for cur_id in np.unique(self.query_ids_test):
+                mask = self.query_ids_test == cur_id
+                X_test_tmp = self.X_test[mask]
+                valid_pred = self.model(X_test_tmp)
+                ndcg_score = self._ndcg_k(
+                    self.ys_test[mask], valid_pred, self.ndcg_top_k)
+                if np.isnan(ndcg_score):
                     ndcgs.append(0)
+                    continue
+                ndcgs.append(ndcg_score)
             return np.mean(ndcgs)
 
-    def _ndcg_k(self, ys_true: torch.Tensor, ys_pred: torch.Tensor,
-                ndcg_top_k: int) -> float:
-        # вызовите функцию ndcg из utils.py. взять первые ndcg_top_k элементов
-        # return utils.# ndcg(ys_true[:ndcg_top_k], ys_pred[:ndcg_top_k], gain_scheme='exp2')
+    def _ndcg_k(self, ys_true, ys_pred, ndcg_top_k) -> float:
         def dcg(ys_true, ys_pred):
             _, argsort = torch.sort(ys_pred, descending=True, dim=0)
             argsort = argsort[:ndcg_top_k]
