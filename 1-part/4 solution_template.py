@@ -14,9 +14,8 @@ from tqdm.auto import tqdm
 class Solution:
     def __init__(self, n_estimators: int = 100, lr: float = 0.5, ndcg_top_k: int = 10,
                  subsample: float = 0.6, colsample_bytree: float = 0.9,
-                 max_depth: int = 5, min_samples_leaf: int = 8):
+                 max_depth: int = 7, min_samples_leaf: int = 8):
         self._prepare_data()
-
         self.num_input_features = self.X_train.shape[1]
         self.num_train_objects = self.X_train.shape[0]
         self.num_test_objects = self.X_test.shape[0]
@@ -36,7 +35,7 @@ class Solution:
         self.best_ndcg = -1
         self.best_iter_idx = -1
 
-    def _get_data(self) -> List[np.ndarray]:
+    def _get_data(self) -> List[np.array]:
         train_df, test_df = msrank_10k()
 
         X_train = train_df.drop([0, 1], axis=1).values
@@ -52,10 +51,11 @@ class Solution:
     def _prepare_data(self) -> None:
         (X_train, y_train, self.query_ids_train,
             X_test, y_test, self.query_ids_test) = self._get_data()
+
         X_train = self._scale_features_in_query_groups(
             X_train, self.query_ids_train)
         X_test = self._scale_features_in_query_groups(
-            X_test, self.query_ids_train)
+            X_test, self.query_ids_test)
 
         self.X_train = torch.FloatTensor(X_train)
         self.X_test = torch.FloatTensor(X_test)
@@ -63,8 +63,8 @@ class Solution:
         self.ys_train = torch.FloatTensor(y_train).reshape(-1, 1)
         self.ys_test = torch.FloatTensor(y_test).reshape(-1, 1)
 
-    def _scale_features_in_query_groups(self, inp_feat_array: np.ndarray,
-                                        inp_query_ids: np.ndarray) -> np.ndarray:
+    def _scale_features_in_query_groups(self, inp_feat_array: np.array,
+                                        inp_query_ids: np.array) -> np.array:
         for cur_id in np.unique(inp_query_ids):
             mask = inp_query_ids == cur_id
             tmp_array = inp_feat_array[mask]
@@ -75,7 +75,7 @@ class Solution:
 
     def _train_one_tree(self, cur_tree_idx: int,
                         train_preds: torch.FloatTensor
-                        ) -> Tuple[DecisionTreeRegressor, np.ndarray]:
+                        ) -> Tuple[DecisionTreeRegressor, np.array]:
         lambdas = torch.zeros(self.num_train_objects, 1)
         for cur_id in np.unique(self.query_ids_train):
             train_mask = self.query_ids_train == cur_id
@@ -94,41 +94,133 @@ class Solution:
             list(range(self.num_train_objects)), self.objects_to_choice, replace=False)
 
         tree.fit(
-            self.X_train[this_tree_objs.reshape(-1)
-                         ][:, this_tree_feats].numpy(),
+            self.X_train[this_tree_objs.reshape(-1)][:, this_tree_feats].numpy(),
             -lambdas[this_tree_objs.reshape(-1), :].numpy()
         )
 
         return tree, this_tree_feats
 
-    def _calc_data_ndcg(self, queries_list: np.ndarray,
+    def _calc_data_ndcg(self, queries_list: np.array,
                         true_labels: torch.FloatTensor, preds: torch.FloatTensor) -> float:
-        ndsgs = []
-        for query in np.unique(queries_list):
-            mask = queries_list == query
-            cur_true_labels = true_labels[mask]
-            cur_preds = preds[mask]
-            ndsgs.append(self._ndcg_k(cur_true_labels, cur_preds, self.ndcg_top_k))
-        return np.mean(ndsgs)
+        ndcgs = []
+        for cur_id in np.unique(queries_list):
+            mask = queries_list == cur_id
+            cur_ndcg = self._ndcg_k(
+                true_labels[mask], preds[mask], self.ndcg_top_k)
+            if np.isnan(cur_ndcg):
+                ndcgs.append(0)
+                continue
+            ndcgs.append(cur_ndcg)
+        return np.mean(ndcgs)
 
     def fit(self):
         np.random.seed(0)
-        # допишите ваш код здесь
-        pass
+        self.trees = []
+        self.trees_feat_idxs = []
+        self.best_ndcg = -1
+        self.best_iter_idx = -1
+
+        train_preds = torch.zeros(self.num_train_objects, 1)
+        test_preds = torch.zeros(self.num_test_objects, 1)
+
+        train_ndcgs, test_ndcgs = [], []
+
+        p_bar = tqdm(range(self.n_estimators))
+        for cur_tree_idx in p_bar:
+            tree, this_tree_feats = self._train_one_tree(
+                cur_tree_idx, train_preds)
+            self.trees.append(tree)
+            self.trees_feat_idxs.append(this_tree_feats)
+
+            cur_tree_train_data = self.X_train[:, this_tree_feats].numpy()
+            train_preds += self.lr * \
+                torch.FloatTensor(tree.predict(
+                    cur_tree_train_data)).reshape(-1, 1)
+            train_ndcg = self._calc_data_ndcg(
+                self.query_ids_train, self.ys_train, train_preds)
+
+            cur_tree_test_data = self.X_test[:, this_tree_feats].numpy()
+            test_preds += self.lr * \
+                torch.FloatTensor(tree.predict(
+                    cur_tree_test_data)).reshape(-1, 1)
+            test_ndcg = self._calc_data_ndcg(
+                self.query_ids_test, self.ys_test, test_preds)
+
+            if self.best_ndcg < test_ndcg:
+                self.best_ndcg = test_ndcg
+                self.best_iter_idx = cur_tree_idx
+
+            train_ndcgs.append(train_ndcg)
+            test_ndcgs.append(test_ndcg)
+            p_bar.set_description_str(
+                f'Test nDCG@{self.ndcg_top_k}={round(test_ndcg, 5)}')
+
+        cut_idx = self.best_iter_idx + 1
+        self.trees = self.trees[:cut_idx]
+        self.trees_feat_idxs = self.trees_feat_idxs[:cut_idx]
 
     def predict(self, data: torch.FloatTensor) -> torch.FloatTensor:
         preds = torch.zeros(data.shape[0], 1)
         for cur_tree_idx in range(len(self.trees)):
             tree = self.trees[cur_tree_idx]
-            features_idx = self.trees_feat_idxs[cur_tree_idx]
-            tmp_preds = tree.predict(data[:, features_idx].numpy())
+            feat_idx = self.trees_feat_idxs[cur_tree_idx]
+            tmp_preds = tree.predict(data[:, feat_idx].numpy())
             preds += self.lr * torch.FloatTensor(tmp_preds).reshape(-1, 1)
-        
+
         return preds
 
-    def _compute_lambdas(self, y_true: torch.FloatTensor, y_pred: torch.FloatTensor) -> torch.FloatTensor:
-        # допишите ваш код здесь
-        pass
+    def _compute_ideal_dcg(self, ys_true: torch.FloatTensor) -> float:
+        def dcg(ys_true, ys_pred):
+            _, argsort = torch.sort(ys_pred, descending=True, dim=0)
+            ys_true_sorted = ys_true[argsort]
+            ret = 0
+            for i, l in enumerate(ys_true_sorted, 1):
+                ret += (2 ** l - 1) / np.log2(1 + i)
+            return ret
+        ideal_dcg = dcg(ys_true, ys_true)
+        return ideal_dcg
+
+    def _compute_lambdas(self, y_true, y_pred):
+        # рассчитаем нормировку, IdealDCG
+        ideal_dcg = self._compute_ideal_dcg(y_true)
+        N = 1 / ideal_dcg
+
+        # рассчитаем порядок документов согласно оценкам релевантности
+        _, rank_order = torch.sort(y_true, descending=True, axis=0)
+        rank_order += 1
+
+        with torch.no_grad():
+            # получаем все попарные разницы скоров в батче
+            pos_pairs_score_diff = 1.0 + torch.exp((y_pred - y_pred.t()))
+
+            # поставим разметку для пар, 1 если первый документ релевантнее
+            # -1 если второй документ релевантнее
+            Sij = self._compute_labels_in_batch(y_true)
+            # посчитаем изменение gain из-за перестановок
+            gain_diff = self._compute_gain_diff(y_true)
+
+            # посчитаем изменение знаменателей-дискаунтеров
+            decay_diff = (1.0 / torch.log2(rank_order + 1.0)) - \
+                (1.0 / torch.log2(rank_order.t() + 1.0))
+            # посчитаем непосредственное изменение nDCG
+            delta_ndcg = torch.abs(N * gain_diff * decay_diff)
+            # посчитаем лямбды
+            lambda_update = (0.5 * (1 - Sij) - 1 /
+                             pos_pairs_score_diff) * delta_ndcg
+            lambda_update = torch.sum(lambda_update, dim=1, keepdim=True)
+
+            return lambda_update
+
+    def _compute_labels_in_batch(self, y_true):
+        rel_diff = y_true - y_true.t()
+        pos_pairs = (rel_diff > 0).type(torch.float32)
+        neg_pairs = (rel_diff < 0).type(torch.float32)
+        Sij = pos_pairs - neg_pairs
+        return Sij
+
+    def _compute_gain_diff(self, y_true):
+        gain_diff = torch.pow(2.0, y_true) - torch.pow(2.0, y_true.t())
+        return gain_diff
 
     def _ndcg_k(self, ys_true, ys_pred, ndcg_top_k) -> float:
         def dcg(ys_true, ys_pred):
@@ -144,21 +236,18 @@ class Solution:
         return (pred_dcg / ideal_dcg).item()
 
     def save_model(self, path: str):
-        # сохранить self.model с тремя полями: n_estimators, max_depth, min_samples_leaf
         state = {
             'trees': self.trees,
             'trees_feat_idxs': self.trees_feat_idxs,
             'best_ndcg': self.best_ndcg,
             'lr': self.lr
         }
-        with open(path, 'wb') as f:
-            pickle.dump(state, f)
-
+        f = open(path, 'wb')
+        pickle.dump(state, f)
 
     def load_model(self, path: str):
-        # загрузить self.model с тремя полями: n_estimators, max_depth, min_samples_leaf
-        with open(path, 'rb') as f:
-            state = pickle.load(f)
+        f = open(path, 'rb')
+        state = pickle.load(f)
         self.trees = state['trees']
         self.trees_feat_idxs = state['trees_feat_idxs']
         self.best_ndcg = state['best_ndcg']
