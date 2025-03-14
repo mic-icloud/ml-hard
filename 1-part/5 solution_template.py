@@ -1,6 +1,7 @@
 import string
 from collections import Counter
 from typing import Dict, List, Tuple, Union, Callable
+from itertools import chain
 
 import nltk
 import numpy as np
@@ -12,9 +13,10 @@ import torch.nn.functional as F
 
 # Замените пути до директорий и файлов! Можете использовать для локальной отладки.
 # При проверке на сервере пути будут изменены
-glue_qqp_dir = '/data/QQP/'
-glove_path = '/data/glove.6B.50d.txt'
+glue_qqp_dir = '1-part/data/QQP/'
+glove_path = '1-part/data/glove.6B.50d.txt'
 
+nltk.download('punkt_tab')
 
 class GaussianKernel(torch.nn.Module):
     def __init__(self, mu: float = 1., sigma: float = 1.):
@@ -239,7 +241,7 @@ class Solution:
     def get_glue_df(self, partition_type: str) -> pd.DataFrame:
         assert partition_type in ['dev', 'train']
         glue_df = pd.read_csv(
-            self.glue_qqp_dir + f'/{partition_type}.tsv', sep='\t', error_bad_lines=False, dtype=object)
+            self.glue_qqp_dir + f'/{partition_type}.tsv', sep='\t', dtype=object) # error_bad_lines=False
         glue_df = glue_df.dropna(axis=0, how='any').reset_index(drop=True)
         glue_df_fin = pd.DataFrame({
             'id_left': glue_df['qid1'],
@@ -251,21 +253,34 @@ class Solution:
         return glue_df_fin
 
     def hadle_punctuation(self, inp_str: str) -> str:
-        # допишите ваш код здесь
-        pass
+        # очистить текст от пунктуации string.punctuation
+        return ''.join([c for c in inp_str if c not in string.punctuation])
 
     def simple_preproc(self, inp_str: str) -> List[str]:
-        # допишите ваш код здесь
-        pass
+        # обработка пунктуации и приведение к нижнему регистру
+        return [word.lower() for word in nltk.word_tokenize(self.hadle_punctuation(inp_str))]
 
     def _filter_rare_words(self, vocab: Dict[str, int], min_occurancies: int) -> Dict[str, int]:
-        # допишите ваш код здесь
-        pass
+        # очистить словарь по порогу min_occurancies
+        return {k: v for k, v in vocab.items() if v >= min_occurancies}
 
     def get_all_tokens(self, list_of_df: List[pd.DataFrame], min_occurancies: int) -> List[str]:
-        # допишите ваш код здесь
-        pass
-
+        # сформировать уникальное множество токенов из list_of_df используя simple_preproc
+        # и отфильтровать используя _filter_rare_words
+        all_tokens = []
+        sot = set()
+        for df in list_of_df:
+            # взять 2 и 3 столбец из df и применить к ним simple_preproc
+            for col in [2,3]:
+                # sot = sot.union(set(df.iloc[:, col].apply(self.simple_preproc).sum()))
+                # sot.update(df.iloc[:, col].apply(self.simple_preproc).sum())
+                sot.update(item for sublist in df.iloc[:, col].apply(self.simple_preproc) for item in sublist)
+ 
+        all_tokens = list(sot)
+        all_tokens = self._filter_rare_words(Counter(all_tokens), min_occurancies)
+        # import pdb; pdb.set_trace()
+        return list(all_tokens.keys())
+    
     def _read_glove_embeddings(self, file_path: str) -> Dict[str, List[str]]:
         # допишите ваш код здесь
         pass
@@ -376,3 +391,6 @@ class Solution:
         criterion = torch.nn.BCELoss()
         # допишите ваш код здесь
         pass
+
+
+solution = Solution(glue_qqp_dir, glove_path)
