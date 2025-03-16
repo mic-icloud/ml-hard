@@ -9,12 +9,13 @@ import math
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from pathlib import Path
 
 
 # Замените пути до директорий и файлов! Можете использовать для локальной отладки.
 # При проверке на сервере пути будут изменены
-glue_qqp_dir = '1-part/data/QQP/'
-glove_path = '1-part/data/glove.6B.50d.txt'
+glue_qqp_dir = 'ml-hard/1-part/data/QQP'
+glove_path = 'ml-hard/1-part/data/glove.6B.50d.txt'
 
 nltk.download('punkt_tab')
 
@@ -25,8 +26,7 @@ class GaussianKernel(torch.nn.Module):
         self.sigma = sigma
 
     def forward(self, x):
-        # допишите ваш код здесь
-        pass
+        return torch.exp(-0.5 * ((x - self.mu) / self.sigma) ** 2)
 
 
 class KNRM(torch.nn.Module):
@@ -52,13 +52,36 @@ class KNRM(torch.nn.Module):
         self.out_activation = torch.nn.Sigmoid()
 
     def _get_kernels_layers(self) -> torch.nn.ModuleList:
+        """
+        Создание списка из kernel_num гауссовских ядер.
+        Генерируются kernel_num значений mu от -1 до 1.
+        для mu = 5  [-.75, -.25, .25, .75, 1].
+        для mu = 11 [-.9 -.7 -.5 -.3 -.1 .1 .3 .5 .7 .9 1].
+        """
+        def generate_symmetric_sequence(length):
+            step = 1 / (length - 1)
+            first_half = np.round([step + i * 2 * step for i in range(length // 2)], 2)
+            symmetric_sequence = np.concatenate((-np.array(first_half[::-1]), first_half, [1]))
+            for value in symmetric_sequence:
+                yield value
+
         kernels = torch.nn.ModuleList()
-        # допишите ваш код здесь
+        for mu in generate_symmetric_sequence(self.kernel_num):
+            sigma = self.exact_sigma if mu == 1 else self.sigma
+            kernels.append(GaussianKernel(mu, sigma))
         return kernels
 
     def _get_mlp(self) -> torch.nn.Sequential:
-       # допишите ваш код здесь
-       pass
+        layers = []
+        prev_layer_size = self.kernel_num
+        if not self.out_layers:
+            return torch.nn.Sequential(torch.nn.Linear(prev_layer_size, 1))
+        for layer_size in self.out_layers:
+            layers.append(torch.nn.Linear(prev_layer_size, layer_size))
+            layers.append(torch.nn.ReLU())
+            prev_layer_size = layer_size
+        layers.append(torch.nn.Linear(prev_layer_size, 1))
+        return torch.nn.Sequential(*layers)
 
     def forward(self, input_1: Dict[str, torch.Tensor], input_2: Dict[str, torch.Tensor]) -> torch.FloatTensor:
         logits_1 = self.predict(input_1)
@@ -70,8 +93,17 @@ class KNRM(torch.nn.Module):
         return out
 
     def _get_matching_matrix(self, query: torch.Tensor, doc: torch.Tensor) -> torch.FloatTensor:
-        # допишите ваш код здесь
-        pass
+        # shape = [Batch, Left, Emb], [Batch, Right, Emb]
+        query_emb = self.embeddings(query)
+        doc_emb = self.embeddings(doc)
+
+        # shape = [Batch, Left, Right, Emb]
+        query_emb = query_emb.unsqueeze(2)
+        doc_emb = doc_emb.unsqueeze(1)
+
+        # shape = [Batch, Left, Right, Emb]
+        matching_matrix = query_emb * doc_emb
+        return matching_matrix
 
     def _apply_kernels(self, matching_matrix: torch.FloatTensor) -> torch.FloatTensor:
         KM = []
@@ -208,6 +240,7 @@ class Solution:
                  ):
         self.glue_qqp_dir = glue_qqp_dir
         self.glove_vectors_path = glove_vectors_path
+
         self.glue_train_df = self.get_glue_df('train')
         self.glue_dev_df = self.get_glue_df('dev')
         self.dev_pairs_for_ndcg = self.create_val_pairs(self.glue_dev_df)
@@ -282,14 +315,41 @@ class Solution:
         return list(all_tokens.keys())
     
     def _read_glove_embeddings(self, file_path: str) -> Dict[str, List[str]]:
-        # допишите ваш код здесь
-        pass
-
+        d = dict()
+        with open(file_path, 'r', encoding='utf-8') as file:
+            for line in file:
+                parts = line.strip().split()  # Разделение строки на части
+                word = parts[0]  # Первый элемент — слово
+                vector = list(map(float, parts[1:]))  # Остальные элементы — вектор
+                d[word] = vector
+        return d
+        
     def create_glove_emb_from_file(self, file_path: str, inner_keys: List[str],
                                    random_seed: int, rand_uni_bound: float
                                    ) -> Tuple[np.ndarray, Dict[str, int], List[str]]:
-        # допишите ваш код здесь
-        pass
+        """
+        :param file_path: путь к файлу с эмбеддингами
+        :param inner_keys: список ключей(токенов), для которых нужно получить эмбеддинги
+        :param random_seed: seed для torch.manual_seed
+        :param rand_uni_bound: граница для torch.nn.init.uniform_
+        :return: кортеж из матрицы эмбеддингов, словаря токен-индекс, списка неизвестных слов
+        """
+        glove_dict = self._read_glove_embeddings(file_path)
+        emb_size = len(next(iter(glove_dict.values())))
+        # в словарь нужно добавить токены OOV и PAD с индексами 0 и 1
+        vocab = {k: i + 2 for i, k in enumerate(inner_keys)}
+        vocab['OOV'] = 0
+        vocab['PAD'] = 1
+        unk_words = []
+        emb_matrix = np.zeros((len(vocab), emb_size))
+        torch.manual_seed(random_seed)
+        for token, idx in vocab.items():
+            if token in glove_dict:
+                emb_matrix[idx] = glove_dict[token]
+            else:
+                unk_words.append(token)
+                torch.nn.init.uniform_(torch.from_numpy(emb_matrix[idx]), -rand_uni_bound, rand_uni_bound)
+        return emb_matrix, vocab, unk_words
 
     def build_knrm_model(self) -> Tuple[torch.nn.Module, Dict[str, int], List[str]]:
         emb_matrix, vocab, unk_words = self.create_glove_emb_from_file(
