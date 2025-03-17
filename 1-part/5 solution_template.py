@@ -96,16 +96,17 @@ class KNRM(torch.nn.Module):
         return out
 
     def _get_matching_matrix(self, query: torch.Tensor, doc: torch.Tensor) -> torch.FloatTensor:
-        # shape = [Batch, Left, Emb], [Batch, Right, Emb]
-        query_emb = self.embeddings(query)
-        doc_emb = self.embeddings(doc)
+        # shape = [B, L, D]
+        embed_query = self.embeddings(query.long())
+        # shape = [B, R, D]
+        embed_doc = self.embeddings(doc.long())
 
-        # shape = [Batch, Left, Right, Emb]
-        query_emb = query_emb.unsqueeze(2)
-        doc_emb = doc_emb.unsqueeze(1)
-
-        # shape = [Batch, Left, Right, Emb]
-        matching_matrix = query_emb * doc_emb
+        # shape = [B, L, R]
+        matching_matrix = torch.einsum(
+            'bld,brd->blr',
+            F.normalize(embed_query, p=2, dim=-1),
+            F.normalize(embed_doc, p=2, dim=-1)
+        )
         return matching_matrix
 
     def _apply_kernels(self, matching_matrix: torch.FloatTensor) -> torch.FloatTensor:
@@ -162,19 +163,18 @@ class RankingDataset(torch.utils.data.Dataset):
 
 class TrainTripletsDataset(RankingDataset):
     def __getitem__(self, idx):
-        id_l, id_r, t = self.index_pairs_or_triplets[idx]
-        # for item in self.index_pairs_or_triplets:
-        #     if item[0] == id_l and item[1] != id_r:
-        #         id_r2 = item[1]
-        #         break  
-        id_r2 = next(
-            (item[1] for item in self.index_pairs_or_triplets if item[0] == id_l and item[1] != id_r), 
-            None
-            )
-        q = self._convert_text_idx_to_token_idxs(id_l)
-        d1 = self._convert_text_idx_to_token_idxs(id_r)
-        d2 = self._convert_text_idx_to_token_idxs(id_r2)
-        return dict(query=q, document=d1), dict(query=q, document=d2), t                    
+        cur_row = self.index_pairs_or_triplets[idx]
+        left_idxs = self._convert_text_idx_to_token_idxs(cur_row[0])[
+            :self.max_len]
+        r1_idxs = self._convert_text_idx_to_token_idxs(cur_row[1])[
+            :self.max_len]
+        r2_idxs = self._convert_text_idx_to_token_idxs(cur_row[2])[
+            :self.max_len]
+
+        pair_1 = {'query': left_idxs, 'document': r1_idxs}
+        pair_2 = {'query': left_idxs, 'document': r2_idxs}
+        target = cur_row[3]
+        return (pair_1, pair_2, target)                   
 
 
 class ValPairsDataset(RankingDataset):
