@@ -14,8 +14,11 @@ from pathlib import Path
 
 # Замените пути до директорий и файлов! Можете использовать для локальной отладки.
 # При проверке на сервере пути будут изменены
-glue_qqp_dir = 'ml-hard/1-part/data/QQP'
-glove_path = 'ml-hard/1-part/data/glove.6B.50d.txt'
+# glue_qqp_dir = 'ml-hard/1-part/data/QQP'
+# glove_path = 'ml-hard/1-part/data/glove.6B.50d.txt'
+glue_qqp_dir = '1-part/data/QQP'
+glove_path = '1-part/data/glove.6B.50d.txt'
+
 
 nltk.download('punkt_tab')
 
@@ -144,27 +147,42 @@ class RankingDataset(torch.utils.data.Dataset):
         return len(self.index_pairs_or_triplets)
 
     def _tokenized_text_to_index(self, tokenized_text: List[str]) -> List[int]:
-        # допишите ваш код здесь
-        pass
+        return [self.vocab.get(token, self.oov_val) for token in tokenized_text]
 
     def _convert_text_idx_to_token_idxs(self, idx: int) -> List[int]:
-        # допишите ваш код здесь
-        pass
-
+        text = self.idx_to_text_mapping[idx]
+        tokenized_text = self.preproc_func(text)
+        return self._tokenized_text_to_index(
+            tokenized_text if len(tokenized_text) < self.max_len else tokenized_text[:self.max_len]
+            )
+         
     def __getitem__(self, idx: int):
-        pass
+        raise NotImplementedError()
 
 
 class TrainTripletsDataset(RankingDataset):
     def __getitem__(self, idx):
-        # допишите ваш код здесь
-        pass
+        id_l, id_r, t = self.index_pairs_or_triplets[idx]
+        # for item in self.index_pairs_or_triplets:
+        #     if item[0] == id_l and item[1] != id_r:
+        #         id_r2 = item[1]
+        #         break  
+        id_r2 = next(
+            (item[1] for item in self.index_pairs_or_triplets if item[0] == id_l and item[1] != id_r), 
+            None
+            )
+        q = self._convert_text_idx_to_token_idxs(id_l)
+        d1 = self._convert_text_idx_to_token_idxs(id_r)
+        d2 = self._convert_text_idx_to_token_idxs(id_r2)
+        return dict(query=q, document=d1), dict(query=q, document=d2), t                    
 
 
 class ValPairsDataset(RankingDataset):
     def __getitem__(self, idx):
-        # допишите ваш код здесь
-        pass
+        id_l, id_r, t = self.index_pairs_or_triplets[idx]
+        q = self._convert_text_idx_to_token_idxs(id_l)
+        d = self._convert_text_idx_to_token_idxs(id_r)
+        return dict(query=q, document=d), t
 
 
 def collate_fn(batch_objs: List[Union[Dict[str, torch.Tensor], torch.FloatTensor]]):
