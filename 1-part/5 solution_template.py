@@ -102,7 +102,7 @@ class KNRM(torch.nn.Module):
         embed_doc = self.embeddings(doc.long())
 
         # shape = [B, L, R]
-        matching_matrix = torch.einsum(
+        matching_matrix = torch.einsum(    
             'bld,brd->blr',
             F.normalize(embed_query, p=2, dim=-1),
             F.normalize(embed_doc, p=2, dim=-1)
@@ -379,8 +379,35 @@ class Solution:
 
     def sample_data_for_train_iter(self, inp_df: pd.DataFrame, seed: int
                                    ) -> List[List[Union[str, float]]]:
-        # допишите ваш код здесь
-        pass
+        groups = inp_df[['id_left', 'id_right', 'label']].groupby('id_left')
+        pairs_w_labels = []
+        np.random.seed(seed)
+        all_right_ids = inp_df.id_right.values
+        for id_left, group in groups:
+            labels = group.label.unique()
+            if len(labels) > 1:
+                for label in labels:
+                    same_label_samples = group[group.label ==
+                                               label].id_right.values
+                    if label == 0 and len(same_label_samples) > 1:
+                        sample = np.random.choice(
+                            same_label_samples, 2, replace=False)
+                        pairs_w_labels.append(
+                            [id_left, sample[0], sample[1], 0.5])
+                    elif label == 1:
+                        less_label_samples = group[group.label <
+                                                   label].id_right.values
+                        pos_sample = np.random.choice(
+                            same_label_samples, 1, replace=False)
+                        if len(less_label_samples) > 0:
+                            neg_sample = np.random.choice(
+                                less_label_samples, 1, replace=False)
+                        else:
+                            neg_sample = np.random.choice(
+                                all_right_ids, 1, replace=False)
+                        pairs_w_labels.append(
+                            [id_left, pos_sample[0], neg_sample[0], 1])
+        return pairs_w_labels
 
     def create_val_pairs(self, inp_df: pd.DataFrame, fill_top_to: int = 15,
                          min_group_size: int = 2, seed: int = 0) -> List[List[Union[str, float]]]:
@@ -438,8 +465,17 @@ class Solution:
         return left_dict
 
     def ndcg_k(self, ys_true: np.array, ys_pred: np.array, ndcg_top_k: int = 10) -> float:
-        # допишите ваш код здесь  (обратите внимание, что используются вектора numpy)
-        pass
+        def dcg(ys_true, ys_pred):
+            argsort = np.argsort(ys_pred)[::-1]
+            argsort = argsort[:ndcg_top_k]
+            ys_true_sorted = ys_true[argsort]
+            ret = 0
+            for i, l in enumerate(ys_true_sorted, 1):
+                ret += (2 ** l - 1) / math.log2(1 + i)
+            return ret
+        ideal_dcg = dcg(ys_true, ys_true)
+        pred_dcg = dcg(ys_true, ys_pred)
+        return (pred_dcg / ideal_dcg)
 
     def valid(self, model: torch.nn.Module, val_dataloader: torch.utils.data.DataLoader) -> float:
         labels_and_groups = val_dataloader.dataset.index_pairs_or_triplets
@@ -467,8 +503,41 @@ class Solution:
     def train(self, n_epochs: int):
         opt = torch.optim.SGD(self.model.parameters(), lr=self.train_lr)
         criterion = torch.nn.BCELoss()
-        # допишите ваш код здесь
-        pass
+        ndcgs = []
+        for ep in range(n_epochs):
+            if ep % self.change_train_loader_ep == 0:
+                sampled_train_triplets = self.sample_data_for_train_iter(self.glue_train_df, seed = ep)
+                train_dataset = TrainTripletsDataset(sampled_train_triplets, 
+                        self.idx_to_text_mapping_train, 
+                        vocab=self.vocab, oov_val=self.vocab['OOV'], 
+                        preproc_func=self.simple_preproc)
+                train_dataloader = torch.utils.data.DataLoader(
+                    train_dataset, batch_size=self.dataloader_bs, num_workers=0, 
+                    collate_fn=collate_fn, shuffle=True, )
+
+            for batch in (train_dataloader):
+
+                inp_1, inp_2, y = batch
+                preds = self.model(inp_1, inp_2)
+                loss = criterion(preds, y)
+                loss.backward()
+                opt.step()
+            ndcg = self.valid(self.model, self.val_dataloader)
+            ndcgs.append(ndcg)
+            if ndcg > 0.925:
+                break
 
 
-solution = Solution(glue_qqp_dir, glove_path)
+# sol = Solution(glue_qqp_dir, glove_path, knrm_out_mlp=[])
+
+# sol.train(10)
+# state_mlp = sol.model.mlp.state_dict()
+# torch.save(state_mlp, open('../lec11/user_input/knrm_mlp.bin', 'wb'))
+
+# state_emb = sol.model.embeddings.state_dict()
+# # torch.save(state_emb, open('../lec11/user_input/knrm_emb.bin', 'wb'))
+# torch.save(state_emb, open('../additional_data/lec11/knrm_emb.bin', 'wb'))
+
+# import json
+# state_vocab = sol.vocab
+# json.dump(state_vocab, open('../additional_data/lec11/vocab.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=4)
