@@ -16,7 +16,15 @@ import faiss
 from langdetect import detect
 
 class GaussianKernel(torch.nn.Module):
-    pass
+    def __init__(self, mu: float = 1., sigma: float = 1.):
+        super().__init__()
+        self.mu = mu
+        self.sigma = sigma
+
+    def forward(self, x):
+        return torch.exp(
+            -0.5 * ((x - self.mu) ** 2) / (self.sigma ** 2)
+        )
 
 class KNRM(torch.nn.Module):
     def __init__(self, 
